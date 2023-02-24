@@ -1,0 +1,1448 @@
+---
+title: "Del Norte COOP"
+author: "Brian"
+date: "2/20/2023"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r libraries, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(snotelr)
+library(riem)
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(dataRetrieval)
+library(lubridate)
+library(sf)
+library(ggthemes)
+library(xts)
+library(dygraphs)
+library(scales)
+library(openair)
+library(plotly)
+library(SciViews)
+knitr::opts_chunk$set(message = F, 
+                      warning = F,
+                      cache = T)
+knitr::opts_chunk$set(echo = TRUE)
+library(trend)
+library(nhdplusTools)
+library(lfstat)
+library(ggpubr)
+library(kableExtra)
+
+#Stats
+library(forcats)
+library(stringr)
+library(trend)
+
+# COOP/ Did not work
+#library(rnoaa)
+```
+
+# Coop Data
+
+NOAA/NWS Cooperative Observer Network
+
+Downloading from the [Iowa Environmental Mesonet](https://mesonet.agron.iastate.edu/request/coop/fe.phtml?network=COCLIMATE).
+(Data taken from [the neighboring COOP analysis](https://brmaste.github.io/All_COOP/All_COOP_stations.html)
+
+Station: DEL NORTE 2E, CO2184
+
+```{r read in for knitting}
+COOP_stations <- read.csv("C:/Users/13074/Documents/ESS580/thesis_project/All_COOP_stations/data_raw/COOP_stations.csv", header = TRUE)
+#str(COOP_stations)
+```
+
+
+
+```{r data cleanup}
+
+COOP_stations$Date <- ymd(COOP_stations$day)
+del_norte_clean <- COOP_stations %>% # filter for the timeframe
+  filter(station == "CO2184") %>% 
+  addWaterYear() %>%
+  mutate(daymonth = format(as.Date(Date), "%d-%m")) %>% 
+  group_by(waterYear)%>% 
+  mutate(waterDay = (as.integer(difftime(Date, ymd(paste0(waterYear - 1 ,'-09-30')), units = "days")))) %>%   na.omit()
+del_norte_clean <- del_norte_clean %>% 
+  mutate(avg_T_c = (highc+lowc)/2) %>% 
+  filter(waterYear <= 2022)
+write.csv(del_norte_clean,"C:/Users/13074/Documents/ESS580/thesis_project/del_norte/data_clean/del_norte_clean.csv", row.names = FALSE)
+```
+
+### Figure check
+
+```{r S del_norte simple plot}
+
+str(del_norte_clean)
+
+ggplot(del_norte_clean, aes(x = Date, y = avg_T_c)) +
+  geom_line() + #lwd = 2) +
+  theme_few() +
+  geom_smooth(method = "lm", se=FALSE) +
+  ylab('Daily temperature (°C)') + 
+  xlab('Date')
+
+#Check for outliers....
+
+#dygraph
+
+del_norte_temp_xts <- xts(del_norte_clean$avg_T_c, order.by = del_norte_clean$Date)
+
+dygraph(del_norte_temp_xts) %>%
+  dyAxis("y", label = "Daily temperature (°C)") 
+
+```
+
+## Detrending Data 
+
+There are two pieces of detrended: shifting by the mean and the sigmoidal detrending.
+
+```{r del_norte detrending data}
+#SF figured out the yearly average by water year
+
+#average water year temperature
+
+del_norte_yearly_wy_aver <- del_norte_clean %>% 
+  group_by(waterYear) %>% 
+  mutate(aver_ann_temp = mean(avg_T_c))
+
+```
+
+```{r detrending data2}
+#Average temperature by day for all water years:
+
+del_norte_daily_wy_aver <- del_norte_yearly_wy_aver %>% 
+  group_by(daymonth) %>% 
+  mutate(aver_day_temp = mean(aver_ann_temp))
+
+#average mean temperature by day for the period of record:
+
+del_norte_daily_wy_aver <- del_norte_daily_wy_aver %>% 
+  group_by(daymonth) %>% 
+  mutate(all_ave_temp = mean(del_norte_daily_wy_aver$aver_day_temp))
+
+#str(daily_wy_aver)
+
+```
+
+```{r Figure all year average temp}
+# try to show all years as means. 
+del_norte_daily_wy_aver2 <- del_norte_daily_wy_aver %>% 
+  #filter(waterYear == "1987" | waterYear == "2021") %>%
+  group_by(waterDay) %>%
+  mutate(date_temp = mean(avg_T_c))
+  
+del_norte_daily_wy_aver2$date_temp <- signif(del_norte_daily_wy_aver2$date_temp,3) #reduce the sig figs
+
+ggplot(del_norte_daily_wy_aver2, aes(x = waterDay, y = date_temp))+#, color = waterYear)) +
+  geom_line(size= 0.7) +
+  #geom_line(aes) +
+  theme_few() +
+  #geom_smooth(method = "lm", se=FALSE) +
+  ylab('Average Daily temperature (°C)') + 
+  xlab('Day of water year')
+```
+
+
+```{r xts Figure all year average temp, eval=FALSE, include=FALSE}
+del_norte_temp_xts_2 <- xts(del_norte_daily_wy_aver2$date_temp, order.by = as.Date(del_norte_daily_wy_aver2$waterDay))
+
+dygraph(del_norte_temp_xts_2) %>%
+  dyAxis("y", label = "(°C)") 
+
+# **Day of year average temperature for the 1987-2021 period of record for Steamboat del_norte site. *(x-axis is day of year, not date)* **
+```
+
+# Standard Deviation 
+
+To figure out the standard deviation for each year, I want the "residual" for each daily value. 
+
+The standard deviation will be the daily residual minus the mean of the residuals by water year, summed and squared, then divided by the number of observations minus one. The square root of the resulting value of which is thus the standard deviation for the water year. 
+
+Determining residuals
+```{r del_norte residuals}
+del_norte_standard_dev <- del_norte_daily_wy_aver %>% 
+  group_by(waterYear) %>% 
+  mutate(residual = (all_ave_temp-aver_ann_temp)+avg_T_c-aver_day_temp) %>% 
+  mutate(deviation = abs(residual-lag(residual)))
+
+mean(del_norte_standard_dev$residual)
+```
+*The mean of the residuals is close enough to zero*
+
+Calculating standard deviation for the timeseries
+```{r del_norte sd}
+del_norte_standard_dev_all <- del_norte_standard_dev %>% 
+  group_by(waterYear) %>% 
+  mutate(nmbr = n())
+
+del_norte_standard_dev_all <- del_norte_standard_dev_all %>% 
+  group_by(waterYear) %>% 
+  mutate(resid_mean = mean(residual)) %>%
+  mutate(sd_1 = residual-resid_mean) %>% 
+  mutate(sd_2 = (((sum((sd_1)^2))/((nmbr-1))))^(0.5)) %>%
+  distinct(sd_2, .keep_all = TRUE) %>% 
+   select(waterYear, sd_2)
+
+del_norte_standard_dev_all %>% 
+  kable(.,'html') %>%
+  kable_styling() %>%
+  scroll_box(width='250px',height='500px')
+
+ggplot(del_norte_standard_dev_all, aes(x = waterYear, y = sd_2))+#, color = waterYear)) +
+  geom_line(size= 0.7) +
+  #geom_line(aes) +
+  theme_few() +
+  geom_smooth(method = "lm", se=FALSE) +
+  ylab('SD') + 
+  xlab('Water year')
+```
+
+## Full timeseries Mann-Kendall & Sen’s Slope
+
+```{r Full Mann-Kendall & Sen’s Slope}
+
+sd_mk_all <- mk.test(del_norte_standard_dev_all$sd_2)
+print(sd_mk_all)
+
+sd_sens_all <- sens.slope(del_norte_standard_dev_all$sd_2)
+print(sd_sens_all)
+
+
+```
+
+
+## Checking a random year from the timeseries. 
+```{r sd 87}
+del_norte_standard_dev_87 <- del_norte_standard_dev %>% 
+  filter(waterYear == 1987) %>% 
+  group_by(waterYear) %>% 
+  mutate(resid_mean = mean(residual)) %>%
+           mutate(sd_1 = residual-resid_mean)
+
+del_norte_standard_dev_87 <- del_norte_standard_dev_87 %>%
+  group_by(waterYear) %>%
+  mutate(sd_2 = (((sum((sd_1)^2))/((sum(tabulate(del_norte_standard_dev_87$waterDay)))-1)))^(0.5))
+
+head(del_norte_standard_dev_87$sd_2, 1)
+```
+*Looks good.*
+
+# Summer temperature standard deviation
+
+```{r del_norte summer}
+
+del_norte_standard_dev_all_summer <- del_norte_standard_dev %>%
+  filter(waterDay >= 244 & waterDay <= 335) %>% # this might be better off as daymonth rather than day of water year due to leap year
+  group_by(waterYear) %>% 
+  mutate(nmbr = n())
+
+del_norte_standard_dev_all_summer <- del_norte_standard_dev_all_summer %>% 
+  group_by(waterYear) %>% 
+  mutate(resid_mean = mean(residual)) %>%
+  mutate(sd_1 = residual-resid_mean) %>% 
+  mutate(sd_2 = (((sum((sd_1)^2))/((nmbr-1))))^(0.5)) %>%
+  distinct(sd_2, .keep_all = TRUE) %>% 
+   select(waterYear, sd_2)
+
+del_norte_standard_dev_all_summer %>% 
+  kable(.,'html') %>%
+  kable_styling() %>%
+  scroll_box(width='250px',height='500px')
+
+ggplot(del_norte_standard_dev_all_summer, aes(x = waterYear, y = sd_2))+#, color = waterYear)) +
+  geom_line(size= 0.7) +
+  #geom_line(aes) +
+  theme_few() +
+  geom_smooth(method = "lm", se=FALSE) +
+  ylab('SD') + 
+  xlab('Water year')
+
+```
+
+**Jun-Aug standard deviation for water years 1900-2021**
+
+## Mann-Kendall & Sen’s Slope
+
+Summer standard deviations.
+```{r sd mk & ss summer}
+
+sd_mk_summer <- mk.test(del_norte_standard_dev_all_summer$sd_2)
+print(sd_mk_summer)
+
+sd_sens_summer <- sens.slope(del_norte_standard_dev_all_summer$sd_2)
+print(sd_sens_summer)
+
+```
+
+# Winter temperature standard deviation
+
+```{r del_norte winter}
+
+del_norte_standard_dev_all_winter <- del_norte_standard_dev %>%
+  filter(waterDay >= 32 & waterDay <= 182) %>% # this might be better off as daymonth rather than day of water year due to leap year
+  group_by(waterYear) %>% 
+  mutate(nmbr = n())
+
+del_norte_standard_dev_all_winter <- del_norte_standard_dev_all_winter %>% 
+  group_by(waterYear) %>% 
+  mutate(resid_mean = mean(residual)) %>%
+  mutate(sd_1 = residual-resid_mean) %>% 
+  mutate(sd_2 = (((sum((sd_1)^2))/((nmbr-1))))^(0.5)) %>%
+  distinct(sd_2, .keep_all = TRUE) %>% 
+   select(waterYear, sd_2)
+
+del_norte_standard_dev_all_winter %>% 
+  kable(.,'html') %>%
+  kable_styling() %>%
+  scroll_box(width='250px',height='500px')
+
+ggplot(del_norte_standard_dev_all_winter, aes(x = waterYear, y = sd_2))+#, color = waterYear)) +
+  geom_line(size= 0.7) +
+  #geom_line(aes) +
+  theme_few() +
+  geom_smooth(method = "lm", se=FALSE) +
+  ylab('SD') + 
+  xlab('Water year')
+
+```
+
+**Nov-Mar standard deviation for water years 1900-2021**
+
+## Mann-Kendall & Sen’s Slope
+
+Winter standard deviations.
+```{r sd mk & ss winter}
+
+sd_mk_winter <- mk.test(del_norte_standard_dev_all_winter$sd_2)
+print(sd_mk_winter)
+
+sd_sens_winter <- sens.slope(del_norte_standard_dev_all_winter$sd_2)
+print(sd_sens_winter)
+
+```
+
+Smaller time increments might be useful....
+
+# 1987 - 2021
+
+```{r del_norte to Tower}
+
+#average water year temperature
+
+del_norte_yearly_wy_aver_87_21 <- del_norte_clean %>%
+  filter(waterYear >= 1987 & waterYear <= 2021) %>% 
+  group_by(waterYear) %>% 
+  mutate(aver_ann_temp = mean(avg_T_c))
+
+#Average temperature by day for all water years:
+
+del_norte_daily_wy_aver_87_21 <- del_norte_yearly_wy_aver_87_21 %>% 
+  group_by(daymonth) %>% 
+  mutate(aver_day_temp = mean(aver_ann_temp))
+
+#average mean temperature by day for the period of record:
+
+del_norte_daily_wy_aver_87_21 <- del_norte_daily_wy_aver_87_21 %>% 
+  group_by(daymonth) %>% 
+  mutate(all_ave_temp = mean(del_norte_daily_wy_aver_87_21$aver_day_temp)) %>% 
+  group_by(waterYear) %>% 
+  mutate(nmbr = n())
+  
+
+del_norte_standard_dev_87_21 <- del_norte_daily_wy_aver_87_21 %>% 
+  group_by(waterYear) %>% 
+  mutate(residual = (all_ave_temp-aver_ann_temp)+avg_T_c-aver_day_temp) %>% 
+  mutate(deviation = abs(residual-lag(residual)))
+
+del_norte_standard_dev_87_21 <- del_norte_standard_dev_87_21 %>% 
+  group_by(waterYear) %>% 
+  mutate(resid_mean = mean(residual)) %>%
+  mutate(sd_1 = residual-resid_mean) %>% 
+  mutate(sd_2 = (((sum((sd_1)^2))/((nmbr-1))))^(0.5)) %>%
+  distinct(sd_2, .keep_all = TRUE) %>% 
+   select(waterYear, sd_2)
+
+
+del_norte_standard_dev_87_21 %>% 
+  kable(.,'html') %>%
+  kable_styling() %>%
+  scroll_box(width='250px',height='500px')
+
+ggplot(del_norte_standard_dev_87_21, aes(x = waterYear, y = sd_2))+#, color = waterYear)) +
+  geom_line(size= 0.7) +
+  #geom_line(aes) +
+  theme_few() +
+  geom_smooth(method = "lm", se=FALSE) +
+  ylab('SD') + 
+  xlab('Water year')
+
+```
+
+**SD for water years 1987 - 2021**
+
+1987 - 2021  Mann-Kendall & Sen’s Slope
+
+```{r del_norte to Tower tests}
+
+sd_mk_87_21 <- mk.test(del_norte_standard_dev_87_21$sd_2)
+print(sd_mk_87_21)
+
+sd_sens_87_21 <- sens.slope(del_norte_standard_dev_87_21$sd_2)
+print(sd_sens_87_21)
+
+```
+
+## Summer and Winter 87-21
+
+# Summer temperature standard deviation
+
+```{r del_norte 87-21 summer}
+
+# using the 1987- 2021 data frame
+
+del_norte_standard_dev_all_87_21_summer <- del_norte_daily_wy_aver_87_21 %>%
+  filter(waterDay >= 244 & waterDay <= 335) %>% # this might be better off as daymonth rather than day of water year due to leap year
+  group_by(waterYear) %>% 
+  mutate(residual = (all_ave_temp-aver_ann_temp)+avg_T_c-aver_day_temp) %>% 
+  mutate(deviation = abs(residual-lag(residual))) %>% 
+  group_by(waterYear) %>% 
+  mutate(nmbr = n())
+
+del_norte_standard_dev_all_87_21_summer <- del_norte_standard_dev_all_87_21_summer %>% 
+  group_by(waterYear) %>% 
+  mutate(resid_mean = mean(residual)) %>%
+  mutate(sd_1 = residual-resid_mean) %>% 
+  mutate(sd_2 = (((sum((sd_1)^2))/((nmbr-1))))^(0.5)) %>%
+  distinct(sd_2, .keep_all = TRUE) %>% 
+   select(waterYear, sd_2)
+
+del_norte_standard_dev_all_87_21_summer %>% 
+  kable(.,'html') %>%
+  kable_styling() %>%
+  scroll_box(width='250px',height='500px')
+
+ggplot(del_norte_standard_dev_all_87_21_summer, aes(x = waterYear, y = sd_2))+#, color = waterYear)) +
+  geom_line(size= 0.7) +
+  #geom_line(aes) +
+  theme_few() +
+  geom_smooth(method = "lm", se=FALSE) +
+  ylab('SD') + 
+  xlab('Water year')
+
+```
+
+**Summer season SD for water years 1987 - 2021**
+
+## Mann-Kendall & Sen’s Slope
+
+Summer 87-21 standard deviations.
+```{r del_norte sd mk & ss 87-21 summer}
+
+sd_mk_summer <- mk.test(del_norte_standard_dev_all_87_21_summer$sd_2)
+print(sd_mk_summer)
+
+sd_sens_summer <- sens.slope(del_norte_standard_dev_all_summer$sd_2)
+print(sd_sens_summer)
+
+```
+
+# Winter temperature standard deviation
+
+```{r del_norte 87-21 winter}
+
+# using the 1987- 2021 data frame
+
+del_norte_standard_dev_all_87_21_winter <- del_norte_daily_wy_aver_87_21 %>%
+  filter(waterDay >= 32 & waterDay <= 182) %>% # this might be better off as daymonth rather than day of water year due to leap year
+  group_by(waterYear) %>% 
+  mutate(residual = (all_ave_temp-aver_ann_temp)+avg_T_c-aver_day_temp) %>% 
+  mutate(deviation = abs(residual-lag(residual))) %>% 
+  group_by(waterYear) %>% 
+  mutate(nmbr = n())
+
+del_norte_standard_dev_all_87_21_winter <- del_norte_standard_dev_all_87_21_winter %>% 
+  group_by(waterYear) %>% 
+  mutate(resid_mean = mean(residual)) %>%
+  mutate(sd_1 = residual-resid_mean) %>% 
+  mutate(sd_2 = (((sum((sd_1)^2))/((nmbr-1))))^(0.5)) %>%
+  distinct(sd_2, .keep_all = TRUE) %>% 
+   select(waterYear, sd_2)
+
+del_norte_standard_dev_all_87_21_winter %>% 
+  kable(.,'html') %>%
+  kable_styling() %>%
+  scroll_box(width='250px',height='500px')
+
+ggplot(del_norte_standard_dev_all_87_21_winter, aes(x = waterYear, y = sd_2))+#, color = waterYear)) +
+  geom_line(size= 0.7) +
+  #geom_line(aes) +
+  theme_few() +
+  geom_smooth(method = "lm", se=FALSE) +
+  ylab('SD') + 
+  xlab('Water year')
+
+```
+
+**Winter season SD for water years 1987 - 2021**
+
+## Mann-Kendall & Sen’s Slope
+
+1987 - 2021 winter Mann-Kendall & Sen’s Slope
+
+```{r del_norte sd mk & ss 87-21 winter}
+
+sd_mk_87_21_winter <- mk.test(del_norte_standard_dev_all_87_21_winter$sd_2)
+print(sd_mk_87_21_winter)
+
+sd_sens_87_21_winter <- sens.slope(del_norte_standard_dev_all_87_21_winter$sd_2)
+print(sd_sens_87_21_winter)
+
+```
+
+# 1900-1915 minimum and maximum temperatures
+
+```{r 1913 min}
+
+early_del_norte <- del_norte_clean %>% 
+  filter(waterYear >= 1893 & waterYear <= 1915)
+
+del_norte_temp_min_xts <- xts(early_del_norte$lowc, order.by = early_del_norte$Date)
+
+dygraph(del_norte_temp_min_xts) %>%
+  dyAxis("y", label = "Daily min temperature (°C)") 
+
+
+```
+
+*Daily minimum temperatures for water years 1900-1915*
+
+```{r 1913 max}
+
+del_norte_temp_max_xts <- xts(early_del_norte$highc, order.by = early_del_norte$Date)
+
+dygraph(del_norte_temp_max_xts) %>%
+  dyAxis("y", label = "Daily max temperature (°C)") 
+
+
+```
+
+*Daily minimum temperatures for water years 1900-1915*
+
+
+# **By groups of decades**
+
+## 1900-1930 
+
+```{r del_norte 1900-1930}
+
+#average water year temperature
+
+del_norte_yearly_wy_aver_00_30 <- del_norte_clean %>%
+  filter(waterYear >= 1900 & waterYear <= 1930) %>% 
+  group_by(waterYear) %>% 
+  mutate(aver_ann_temp = mean(avg_T_c))
+
+#Average temperature by day for all water years:
+
+del_norte_daily_wy_aver_00_30 <- del_norte_yearly_wy_aver_00_30 %>% 
+  group_by(daymonth) %>% 
+  mutate(aver_day_temp = mean(aver_ann_temp))
+
+#average mean temperature by day for the period of record:
+
+del_norte_daily_wy_aver_00_30 <- del_norte_daily_wy_aver_00_30 %>% 
+  group_by(daymonth) %>% 
+  mutate(all_ave_temp = mean(del_norte_daily_wy_aver_00_30$aver_day_temp)) %>% 
+  group_by(waterYear) %>% 
+  mutate(nmbr = n())
+  
+
+del_norte_standard_dev_00_30 <- del_norte_daily_wy_aver_00_30 %>% 
+  group_by(waterYear) %>% 
+  mutate(residual = (all_ave_temp-aver_ann_temp)+avg_T_c-aver_day_temp) %>% 
+  mutate(deviation = abs(residual-lag(residual)))
+
+del_norte_standard_dev_00_30 <- del_norte_standard_dev_00_30 %>% 
+  group_by(waterYear) %>% 
+  mutate(resid_mean = mean(residual)) %>%
+  mutate(sd_1 = residual-resid_mean) %>% 
+  mutate(sd_2 = (((sum((sd_1)^2))/((nmbr-1))))^(0.5)) %>%
+  distinct(sd_2, .keep_all = TRUE) %>% 
+   select(waterYear, sd_2)
+
+
+del_norte_standard_dev_00_30 %>% 
+  kable(.,'html') %>%
+  kable_styling() %>%
+  scroll_box(width='250px',height='500px')
+
+ggplot(del_norte_standard_dev_00_30, aes(x = waterYear, y = sd_2))+#, color = waterYear)) +
+  geom_line(size= 0.7) +
+  #geom_line(aes) +
+  theme_few() +
+  geom_smooth(method = "lm", se=FALSE) +
+  ylab('SD') + 
+  xlab('Water year')
+
+```
+
+**SD for water years 1900 - 1930**
+
+1900 - 1930  Mann-Kendall & Sen’s Slope
+
+```{r del_norte 00-30 tests}
+
+sd_mk_00_30 <- mk.test(del_norte_standard_dev_00_30$sd_2)
+print(sd_mk_00_30)
+
+sd_sens_00_30 <- sens.slope(del_norte_standard_dev_00_30$sd_2)
+print(sd_sens_00_30)
+
+```
+
+### Summer and Winter 00-30
+
+Summer temperature standard deviation
+
+```{r del_norte 00-30 summer}
+
+# using the 1900- 1930 data frame
+
+del_norte_standard_dev_all_00_30_summer <- del_norte_daily_wy_aver_00_30 %>%
+  filter(waterDay >= 244 & waterDay <= 335) %>% # this might be better off as daymonth rather than day of water year due to leap year
+  group_by(waterYear) %>% 
+  mutate(residual = (all_ave_temp-aver_ann_temp)+avg_T_c-aver_day_temp) %>% 
+  mutate(deviation = abs(residual-lag(residual))) %>% 
+  group_by(waterYear) %>% 
+  mutate(nmbr = n())
+
+del_norte_standard_dev_all_00_30_summer <- del_norte_standard_dev_all_00_30_summer %>% 
+  group_by(waterYear) %>% 
+  mutate(resid_mean = mean(residual)) %>%
+  mutate(sd_1 = residual-resid_mean) %>% 
+  mutate(sd_2 = (((sum((sd_1)^2))/((nmbr-1))))^(0.5)) %>%
+  distinct(sd_2, .keep_all = TRUE) %>% 
+   select(waterYear, sd_2)
+
+del_norte_standard_dev_all_00_30_summer %>% 
+  kable(.,'html') %>%
+  kable_styling() %>%
+  scroll_box(width='250px',height='500px')
+
+ggplot(del_norte_standard_dev_all_00_30_summer, aes(x = waterYear, y = sd_2))+#, color = waterYear)) +
+  geom_line(size= 0.7) +
+  #geom_line(aes) +
+  theme_few() +
+  geom_smooth(method = "lm", se=FALSE) +
+  ylab('SD') + 
+  xlab('Water year')
+
+```
+
+**Summer season SD for water years 1900 - 1930**
+
+Mann-Kendall & Sen’s Slope
+
+Summer 00-30 standard deviations.
+```{r del_norte sd mk & ss 00-30 summer}
+
+sd_mk_00_30_summer <- mk.test(del_norte_standard_dev_all_00_30_summer$sd_2)
+print(sd_mk_00_30_summer)
+
+sd_sens_00_30_summer <- sens.slope(del_norte_standard_dev_all_00_30_summer$sd_2)
+print(sd_sens_00_30_summer)
+
+```
+
+ Winter temperature standard deviation
+
+```{r del_norte 00-30 winter}
+
+# using the 00-30 data frame
+
+del_norte_standard_dev_all_00_30_winter <- del_norte_daily_wy_aver_00_30 %>%
+  filter(waterDay >= 32 & waterDay <= 182) %>% # this might be better off as daymonth rather than day of water year due to leap year
+  group_by(waterYear) %>% 
+  mutate(residual = (all_ave_temp-aver_ann_temp)+avg_T_c-aver_day_temp) %>% 
+  mutate(deviation = abs(residual-lag(residual))) %>% 
+  group_by(waterYear) %>% 
+  mutate(nmbr = n())
+
+del_norte_standard_dev_all_00_30_winter <- del_norte_standard_dev_all_00_30_winter %>% 
+  group_by(waterYear) %>% 
+  mutate(resid_mean = mean(residual)) %>%
+  mutate(sd_1 = residual-resid_mean) %>% 
+  mutate(sd_2 = (((sum((sd_1)^2))/((nmbr-1))))^(0.5)) %>%
+  distinct(sd_2, .keep_all = TRUE) %>% 
+   select(waterYear, sd_2)
+
+del_norte_standard_dev_all_00_30_winter %>% 
+  kable(.,'html') %>%
+  kable_styling() %>%
+  scroll_box(width='250px',height='500px')
+
+ggplot(del_norte_standard_dev_all_00_30_winter, aes(x = waterYear, y = sd_2))+#, color = waterYear)) +
+  geom_line(size= 0.7) +
+  #geom_line(aes) +
+  theme_few() +
+  geom_smooth(method = "lm", se=FALSE) +
+  ylab('SD') + 
+  xlab('Water year')
+
+```
+
+**Winter season SD for water years 1900 - 1930**
+
+ Mann-Kendall & Sen’s Slope
+
+1900 - 1930 winter Mann-Kendall & Sen’s Slope
+
+```{r del_norte sd mk & ss 00-30 winter}
+
+sd_mk_00_30_winter <- mk.test(del_norte_standard_dev_all_00_30_winter$sd_2)
+print(sd_mk_00_30_winter)
+
+sd_sens_00_30_winter <- sens.slope(del_norte_standard_dev_all_00_30_winter$sd_2)
+print(sd_sens_00_30_winter)
+
+```
+
+
+## 1931-1960 
+
+```{r del_norte 1931-1960}
+
+#average water year temperature
+
+del_norte_yearly_wy_aver_31_60 <- del_norte_clean %>%
+  filter(waterYear >= 1931 & waterYear <= 1960) %>% 
+  group_by(waterYear) %>% 
+  mutate(aver_ann_temp = mean(avg_T_c))
+
+#Average temperature by day for all water years:
+
+del_norte_daily_wy_aver_31_60 <- del_norte_yearly_wy_aver_31_60 %>% 
+  group_by(daymonth) %>% 
+  mutate(aver_day_temp = mean(aver_ann_temp))
+
+#average mean temperature by day for the period of record:
+
+del_norte_daily_wy_aver_31_60 <- del_norte_daily_wy_aver_31_60 %>% 
+  group_by(daymonth) %>% 
+  mutate(all_ave_temp = mean(del_norte_daily_wy_aver_31_60$aver_day_temp)) %>% 
+  group_by(waterYear) %>% 
+  mutate(nmbr = n())
+  
+
+del_norte_standard_dev_31_60 <- del_norte_daily_wy_aver_31_60 %>% 
+  group_by(waterYear) %>% 
+  mutate(residual = (all_ave_temp-aver_ann_temp)+avg_T_c-aver_day_temp) %>% 
+  mutate(deviation = abs(residual-lag(residual)))
+
+del_norte_standard_dev_31_60 <- del_norte_standard_dev_31_60 %>% 
+  group_by(waterYear) %>% 
+  mutate(resid_mean = mean(residual)) %>%
+  mutate(sd_1 = residual-resid_mean) %>% 
+  mutate(sd_2 = (((sum((sd_1)^2))/((nmbr-1))))^(0.5)) %>%
+  distinct(sd_2, .keep_all = TRUE) %>% 
+   select(waterYear, sd_2)
+
+
+del_norte_standard_dev_31_60 %>% 
+  kable(.,'html') %>%
+  kable_styling() %>%
+  scroll_box(width='250px',height='500px')
+
+ggplot(del_norte_standard_dev_31_60, aes(x = waterYear, y = sd_2))+#, color = waterYear)) +
+  geom_line(size= 0.7) +
+  #geom_line(aes) +
+  theme_few() +
+  geom_smooth(method = "lm", se=FALSE) +
+  ylab('SD') + 
+  xlab('Water year')
+
+```
+
+**SD for water years 1931 - 1960**
+
+1931 - 1960  Mann-Kendall & Sen’s Slope
+
+```{r del_norte 31-60 tests}
+
+sd_mk_31_60 <- mk.test(del_norte_standard_dev_31_60$sd_2)
+print(sd_mk_31_60)
+
+sd_sens_31_60 <- sens.slope(del_norte_standard_dev_31_60$sd_2)
+print(sd_sens_31_60)
+
+```
+
+### Summer and Winter 31-60
+
+ Summer temperature standard deviation
+
+```{r del_norte 31-60 summer}
+
+# using the 1931- 1960 data frame
+
+del_norte_standard_dev_all_31_60_summer <- del_norte_daily_wy_aver_31_60 %>%
+  filter(waterDay >= 244 & waterDay <= 335) %>% # this might be better off as daymonth rather than day of water year due to leap year
+  group_by(waterYear) %>% 
+  mutate(residual = (all_ave_temp-aver_ann_temp)+avg_T_c-aver_day_temp) %>% 
+  mutate(deviation = abs(residual-lag(residual))) %>% 
+  group_by(waterYear) %>% 
+  mutate(nmbr = n())
+
+del_norte_standard_dev_all_31_60_summer <- del_norte_standard_dev_all_31_60_summer %>% 
+  group_by(waterYear) %>% 
+  mutate(resid_mean = mean(residual)) %>%
+  mutate(sd_1 = residual-resid_mean) %>% 
+  mutate(sd_2 = (((sum((sd_1)^2))/((nmbr-1))))^(0.5)) %>%
+  distinct(sd_2, .keep_all = TRUE) %>% 
+   select(waterYear, sd_2)
+
+del_norte_standard_dev_all_31_60_summer %>% 
+  kable(.,'html') %>%
+  kable_styling() %>%
+  scroll_box(width='250px',height='500px')
+
+ggplot(del_norte_standard_dev_all_31_60_summer, aes(x = waterYear, y = sd_2))+#, color = waterYear)) +
+  geom_line(size= 0.7) +
+  #geom_line(aes) +
+  theme_few() +
+  geom_smooth(method = "lm", se=FALSE) +
+  ylab('SD') + 
+  xlab('Water year')
+
+```
+
+**Summer season SD for water years 1931 - 1960**
+
+Mann-Kendall & Sen’s Slope
+
+Summer 31-60 standard deviations.
+```{r del_norte sd mk & ss 31-60 summer}
+
+sd_mk_31_60_summer <- mk.test(del_norte_standard_dev_all_31_60_summer$sd_2)
+print(sd_mk_31_60_summer)
+
+sd_sens_31_60_summer <- sens.slope(del_norte_standard_dev_all_31_60_summer$sd_2)
+print(sd_sens_31_60_summer)
+
+```
+
+Winter temperature standard deviation
+
+```{r del_norte 31-60 winter}
+
+# using the 31-60 data frame
+
+del_norte_standard_dev_all_31_60_winter <- del_norte_daily_wy_aver_31_60 %>%
+  filter(waterDay >= 32 & waterDay <= 182) %>% # this might be better off as daymonth rather than day of water year due to leap year
+  group_by(waterYear) %>% 
+  mutate(residual = (all_ave_temp-aver_ann_temp)+avg_T_c-aver_day_temp) %>% 
+  mutate(deviation = abs(residual-lag(residual))) %>% 
+  group_by(waterYear) %>% 
+  mutate(nmbr = n())
+
+del_norte_standard_dev_all_31_60_winter <- del_norte_standard_dev_all_31_60_winter %>% 
+  group_by(waterYear) %>% 
+  mutate(resid_mean = mean(residual)) %>%
+  mutate(sd_1 = residual-resid_mean) %>% 
+  mutate(sd_2 = (((sum((sd_1)^2))/((nmbr-1))))^(0.5)) %>%
+  distinct(sd_2, .keep_all = TRUE) %>% 
+   select(waterYear, sd_2)
+
+del_norte_standard_dev_all_31_60_winter %>% 
+  kable(.,'html') %>%
+  kable_styling() %>%
+  scroll_box(width='250px',height='500px')
+
+ggplot(del_norte_standard_dev_all_31_60_winter, aes(x = waterYear, y = sd_2))+#, color = waterYear)) +
+  geom_line(size= 0.7) +
+  #geom_line(aes) +
+  theme_few() +
+  geom_smooth(method = "lm", se=FALSE) +
+  ylab('SD') + 
+  xlab('Water year')
+
+```
+
+**Winter season SD for water years 1931 - 1960**
+
+Mann-Kendall & Sen’s Slope
+
+1931 - 1960 winter Mann-Kendall & Sen’s Slope
+
+```{r del_norte sd mk & ss 31-60 winter}
+
+sd_mk_31_60_winter <- mk.test(del_norte_standard_dev_all_31_60_winter$sd_2)
+print(sd_mk_31_60_winter)
+
+sd_sens_31_60_winter <- sens.slope(del_norte_standard_dev_all_31_60_winter$sd_2)
+print(sd_sens_31_60_winter)
+
+```
+
+
+## 1961-1990 
+
+
+```{r del_norte 1961-1990}
+
+#average water year temperature
+
+del_norte_yearly_wy_aver_61_90 <- del_norte_clean %>%
+  filter(waterYear >= 1961 & waterYear <= 1990) %>% 
+  group_by(waterYear) %>% 
+  mutate(aver_ann_temp = mean(avg_T_c))
+
+#Average temperature by day for all water years:
+
+del_norte_daily_wy_aver_61_90 <- del_norte_yearly_wy_aver_61_90 %>% 
+  group_by(daymonth) %>% 
+  mutate(aver_day_temp = mean(aver_ann_temp))
+
+#average mean temperature by day for the period of record:
+
+del_norte_daily_wy_aver_61_90 <- del_norte_daily_wy_aver_61_90 %>% 
+  group_by(daymonth) %>% 
+  mutate(all_ave_temp = mean(del_norte_daily_wy_aver_61_90$aver_day_temp)) %>% 
+  group_by(waterYear) %>% 
+  mutate(nmbr = n())
+  
+
+del_norte_standard_dev_61_90 <- del_norte_daily_wy_aver_61_90 %>% 
+  group_by(waterYear) %>% 
+  mutate(residual = (all_ave_temp-aver_ann_temp)+avg_T_c-aver_day_temp) %>% 
+  mutate(deviation = abs(residual-lag(residual)))
+
+del_norte_standard_dev_61_90 <- del_norte_standard_dev_61_90 %>% 
+  group_by(waterYear) %>% 
+  mutate(resid_mean = mean(residual)) %>%
+  mutate(sd_1 = residual-resid_mean) %>% 
+  mutate(sd_2 = (((sum((sd_1)^2))/((nmbr-1))))^(0.5)) %>%
+  distinct(sd_2, .keep_all = TRUE) %>% 
+   select(waterYear, sd_2)
+
+
+del_norte_standard_dev_61_90 %>% 
+  kable(.,'html') %>%
+  kable_styling() %>%
+  scroll_box(width='250px',height='500px')
+
+ggplot(del_norte_standard_dev_61_90, aes(x = waterYear, y = sd_2))+#, color = waterYear)) +
+  geom_line(size= 0.7) +
+  #geom_line(aes) +
+  theme_few() +
+  geom_smooth(method = "lm", se=FALSE) +
+  ylab('SD') + 
+  xlab('Water year')
+
+```
+
+**SD for water years 1961 - 1990**
+
+1961 - 1990  Mann-Kendall & Sen’s Slope
+
+```{r del_norte 61-90 tests}
+
+sd_mk_61_90 <- mk.test(del_norte_standard_dev_61_90$sd_2)
+print(sd_mk_61_90)
+
+sd_sens_61_90 <- sens.slope(del_norte_standard_dev_61_90$sd_2)
+print(sd_sens_61_90)
+
+```
+
+### Summer and Winter 61-90
+
+Summer temperature standard deviation
+
+```{r del_norte 61-90 summer}
+
+# using the 1961- 1990 data frame
+
+del_norte_standard_dev_all_61_90_summer <- del_norte_daily_wy_aver_61_90 %>%
+  filter(waterDay >= 244 & waterDay <= 335) %>% # this might be better off as daymonth rather than day of water year due to leap year
+  group_by(waterYear) %>% 
+  mutate(residual = (all_ave_temp-aver_ann_temp)+avg_T_c-aver_day_temp) %>% 
+  mutate(deviation = abs(residual-lag(residual))) %>% 
+  group_by(waterYear) %>% 
+  mutate(nmbr = n())
+
+del_norte_standard_dev_all_61_90_summer <- del_norte_standard_dev_all_61_90_summer %>% 
+  group_by(waterYear) %>% 
+  mutate(resid_mean = mean(residual)) %>%
+  mutate(sd_1 = residual-resid_mean) %>% 
+  mutate(sd_2 = (((sum((sd_1)^2))/((nmbr-1))))^(0.5)) %>%
+  distinct(sd_2, .keep_all = TRUE) %>% 
+   select(waterYear, sd_2)
+
+del_norte_standard_dev_all_61_90_summer %>% 
+  kable(.,'html') %>%
+  kable_styling() %>%
+  scroll_box(width='250px',height='500px')
+
+ggplot(del_norte_standard_dev_all_61_90_summer, aes(x = waterYear, y = sd_2))+#, color = waterYear)) +
+  geom_line(size= 0.7) +
+  #geom_line(aes) +
+  theme_few() +
+  geom_smooth(method = "lm", se=FALSE) +
+  ylab('SD') + 
+  xlab('Water year')
+
+```
+
+**Summer season SD for water years 1961 - 1990**
+
+Mann-Kendall & Sen’s Slope
+
+Summer 61-90 standard deviations.
+```{r del_norte sd mk & ss 61-90 summer}
+
+sd_mk_61_90_summer <- mk.test(del_norte_standard_dev_all_61_90_summer$sd_2)
+print(sd_mk_61_90_summer)
+
+sd_sens_61_90_summer <- sens.slope(del_norte_standard_dev_all_61_90_summer$sd_2)
+print(sd_sens_61_90_summer)
+
+```
+
+Winter temperature standard deviation
+
+```{r del_norte 61-90 winter}
+
+# using the 61-90 data frame
+
+del_norte_standard_dev_all_61_90_winter <- del_norte_daily_wy_aver_61_90 %>%
+  filter(waterDay >= 32 & waterDay <= 182) %>% # this might be better off as daymonth rather than day of water year due to leap year
+  group_by(waterYear) %>% 
+  mutate(residual = (all_ave_temp-aver_ann_temp)+avg_T_c-aver_day_temp) %>% 
+  mutate(deviation = abs(residual-lag(residual))) %>% 
+  group_by(waterYear) %>% 
+  mutate(nmbr = n())
+
+del_norte_standard_dev_all_61_90_winter <- del_norte_standard_dev_all_61_90_winter %>% 
+  group_by(waterYear) %>% 
+  mutate(resid_mean = mean(residual)) %>%
+  mutate(sd_1 = residual-resid_mean) %>% 
+  mutate(sd_2 = (((sum((sd_1)^2))/((nmbr-1))))^(0.5)) %>%
+  distinct(sd_2, .keep_all = TRUE) %>% 
+   select(waterYear, sd_2)
+
+del_norte_standard_dev_all_61_90_winter %>% 
+  kable(.,'html') %>%
+  kable_styling() %>%
+  scroll_box(width='250px',height='500px')
+
+ggplot(del_norte_standard_dev_all_61_90_winter, aes(x = waterYear, y = sd_2))+#, color = waterYear)) +
+  geom_line(size= 0.7) +
+  #geom_line(aes) +
+  theme_few() +
+  geom_smooth(method = "lm", se=FALSE) +
+  ylab('SD') + 
+  xlab('Water year')
+
+```
+
+**Winter season SD for water years 1961 - 1990**
+
+Mann-Kendall & Sen’s Slope
+
+1961 - 1990 winter Mann-Kendall & Sen’s Slope
+
+```{r del_norte sd mk & ss 61-90 winter}
+
+sd_mk_61_90_winter <- mk.test(del_norte_standard_dev_all_61_90_winter$sd_2)
+print(sd_mk_61_90_winter)
+
+sd_sens_61_90_winter <- sens.slope(del_norte_standard_dev_all_61_90_winter$sd_2)
+print(sd_sens_61_90_winter)
+
+```
+
+## 1991-2020
+
+```{r del_norte 1991-2020}
+
+#average water year temperature
+
+del_norte_yearly_wy_aver_91_20 <- del_norte_clean %>%
+  filter(waterYear >= 1991 & waterYear <= 2020) %>% 
+  group_by(waterYear) %>% 
+  mutate(aver_ann_temp = mean(avg_T_c))
+
+#Average temperature by day for all water years:
+
+del_norte_daily_wy_aver_91_20 <- del_norte_yearly_wy_aver_91_20 %>% 
+  group_by(daymonth) %>% 
+  mutate(aver_day_temp = mean(aver_ann_temp))
+
+#average mean temperature by day for the period of record:
+
+del_norte_daily_wy_aver_91_20 <- del_norte_daily_wy_aver_91_20 %>% 
+  group_by(daymonth) %>% 
+  mutate(all_ave_temp = mean(del_norte_daily_wy_aver_91_20$aver_day_temp)) %>% 
+  group_by(waterYear) %>% 
+  mutate(nmbr = n())
+  
+
+del_norte_standard_dev_91_20 <- del_norte_daily_wy_aver_61_90 %>% 
+  group_by(waterYear) %>% 
+  mutate(residual = (all_ave_temp-aver_ann_temp)+avg_T_c-aver_day_temp) %>% 
+  mutate(deviation = abs(residual-lag(residual)))
+
+del_norte_standard_dev_91_20 <- del_norte_standard_dev_91_20 %>% 
+  group_by(waterYear) %>% 
+  mutate(resid_mean = mean(residual)) %>%
+  mutate(sd_1 = residual-resid_mean) %>% 
+  mutate(sd_2 = (((sum((sd_1)^2))/((nmbr-1))))^(0.5)) %>%
+  distinct(sd_2, .keep_all = TRUE) %>% 
+   select(waterYear, sd_2)
+
+
+del_norte_standard_dev_91_20 %>% 
+  kable(.,'html') %>%
+  kable_styling() %>%
+  scroll_box(width='250px',height='500px')
+
+ggplot(del_norte_standard_dev_91_20, aes(x = waterYear, y = sd_2))+#, color = waterYear)) +
+  geom_line(size= 0.7) +
+  #geom_line(aes) +
+  theme_few() +
+  geom_smooth(method = "lm", se=FALSE) +
+  ylab('SD') + 
+  xlab('Water year')
+
+```
+
+**SD for water years 1991 - 2020**
+
+1991 - 2020  Mann-Kendall & Sen’s Slope
+
+```{r del_norte 91-20 tests}
+
+sd_mk_91_20 <- mk.test(del_norte_standard_dev_91_20$sd_2)
+print(sd_mk_91_20)
+
+sd_sens_91_20 <- sens.slope(del_norte_standard_dev_91_20$sd_2)
+print(sd_sens_91_20)
+
+```
+
+### Summer and Winter 91-20
+
+Summer temperature standard deviation
+
+```{r del_norte 91-20 summer}
+
+# using the 1991- 2020 data frame
+
+del_norte_standard_dev_all_91_20_summer <- del_norte_daily_wy_aver_91_20 %>%
+  filter(waterDay >= 244 & waterDay <= 335) %>% # this might be better off as daymonth rather than day of water year due to leap year
+  group_by(waterYear) %>% 
+  mutate(residual = (all_ave_temp-aver_ann_temp)+avg_T_c-aver_day_temp) %>% 
+  mutate(deviation = abs(residual-lag(residual))) %>% 
+  group_by(waterYear) %>% 
+  mutate(nmbr = n())
+
+del_norte_standard_dev_all_91_20_summer <- del_norte_standard_dev_all_91_20_summer %>% 
+  group_by(waterYear) %>% 
+  mutate(resid_mean = mean(residual)) %>%
+  mutate(sd_1 = residual-resid_mean) %>% 
+  mutate(sd_2 = (((sum((sd_1)^2))/((nmbr-1))))^(0.5)) %>%
+  distinct(sd_2, .keep_all = TRUE) %>% 
+   select(waterYear, sd_2)
+
+del_norte_standard_dev_all_91_20_summer %>% 
+  kable(.,'html') %>%
+  kable_styling() %>%
+  scroll_box(width='250px',height='500px')
+
+ggplot(del_norte_standard_dev_all_91_20_summer, aes(x = waterYear, y = sd_2))+#, color = waterYear)) +
+  geom_line(size= 0.7) +
+  #geom_line(aes) +
+  theme_few() +
+  geom_smooth(method = "lm", se=FALSE) +
+  ylab('SD') + 
+  xlab('Water year')
+
+```
+
+**Summer season SD for water years 1991 - 2020**
+
+Mann-Kendall & Sen’s Slope
+
+Summer 91-20 standard deviations.
+```{r del_norte sd mk & ss 91-20 summer}
+
+sd_mk_91_20_summer <- mk.test(del_norte_standard_dev_all_91_20_summer$sd_2)
+print(sd_mk_91_20_summer)
+
+sd_sens_91_20_summer <- sens.slope(del_norte_standard_dev_all_91_20_summer$sd_2)
+print(sd_sens_91_20_summer)
+
+```
+
+Winter temperature standard deviation
+
+```{r del_norte 91-20 winter}
+
+# using the 91-20 data frame
+
+del_norte_standard_dev_all_91_20_winter <- del_norte_daily_wy_aver_91_20 %>%
+  filter(waterDay >= 32 & waterDay <= 182) %>% # this might be better off as daymonth rather than day of water year due to leap year
+  group_by(waterYear) %>% 
+  mutate(residual = (all_ave_temp-aver_ann_temp)+avg_T_c-aver_day_temp) %>% 
+  mutate(deviation = abs(residual-lag(residual))) %>% 
+  group_by(waterYear) %>% 
+  mutate(nmbr = n())
+
+del_norte_standard_dev_all_91_20_winter <- del_norte_standard_dev_all_91_20_winter %>% 
+  group_by(waterYear) %>% 
+  mutate(resid_mean = mean(residual)) %>%
+  mutate(sd_1 = residual-resid_mean) %>% 
+  mutate(sd_2 = (((sum((sd_1)^2))/((nmbr-1))))^(0.5)) %>%
+  distinct(sd_2, .keep_all = TRUE) %>% 
+   select(waterYear, sd_2)
+
+del_norte_standard_dev_all_91_20_winter %>% 
+  kable(.,'html') %>%
+  kable_styling() %>%
+  scroll_box(width='250px',height='500px')
+
+ggplot(del_norte_standard_dev_all_91_20_winter, aes(x = waterYear, y = sd_2))+#, color = waterYear)) +
+  geom_line(size= 0.7) +
+  #geom_line(aes) +
+  theme_few() +
+  geom_smooth(method = "lm", se=FALSE) +
+  ylab('SD') + 
+  xlab('Water year')
+
+```
+
+**Winter season SD for water years 1991 - 2020**
+
+Mann-Kendall & Sen’s Slope
+
+1991 - 2020 winter Mann-Kendall & Sen’s Slope
+
+```{r del_norte sd mk & ss 91-20 winter}
+
+sd_mk_91_20_winter <- mk.test(del_norte_standard_dev_all_91_20_winter$sd_2)
+print(sd_mk_91_20_winter)
+
+sd_sens_91_20_winter <- sens.slope(del_norte_standard_dev_all_91_20_winter$sd_2)
+print(sd_sens_91_20_winter)
+
+```
+
+# Comparing Climate Normal means
+
+(from 356:)
+
+## 1991-2022
+
+```{r 1991-2022 CN detrend}
+del_norte_yearly_wy_aver_1991_2022_CN <- del_norte_clean %>%
+  filter(waterYear >= 1991 & waterYear <= 2022) %>% 
+  group_by(waterYear) %>% 
+  mutate(aver_ann_temp = mean(avg_T_c))
+
+#Average temperature by day for all water years:
+
+del_norte_daily_wy_aver_1991_2022_CN <- del_norte_yearly_wy_aver_1991_2022_CN %>% 
+  group_by(daymonth) %>% 
+  mutate(aver_day_temp = mean(aver_ann_temp))
+
+#average mean temperature by day for the period of record:
+
+del_norte_daily_wy_aver_1991_2022_CN <- del_norte_daily_wy_aver_1991_2022_CN %>% 
+  group_by(daymonth) %>% 
+  mutate(all_ave_temp = mean(del_norte_daily_wy_aver_1991_2022_CN$aver_day_temp)) %>% 
+  group_by(waterYear) %>% 
+  mutate(nmbr = n())
+
+
+```
+
+
+```{r CN 1991-2022 means figure}
+del_norte_daily_wy_aver_1991_2022_CN2 <- del_norte_daily_wy_aver_1991_2022_CN %>% 
+  #filter(waterYear == "1987" | waterYear == "2021") %>%
+  group_by(waterDay) %>%
+  mutate(date_temp = mean(avg_T_c))%>% 
+  select(waterDay, date_temp) %>% 
+  distinct(waterDay, .keep_all = TRUE)
+  
+del_norte_daily_wy_aver_1991_2022_CN2$date_temp <- signif(del_norte_daily_wy_aver_1991_2022_CN2$date_temp,3) #reduce the sig figs
+
+ggplot(del_norte_daily_wy_aver_1991_2022_CN2, aes(x = waterDay, y = date_temp))+#, color = waterYear)) +
+  geom_line(size= 0.7) +
+  theme_few()
+
+```
+
+## 1961-1990
+
+```{r 1961-1990 CN detrend}
+del_norte_yearly_wy_aver_1961_1990_CN <- del_norte_clean %>%
+  filter(waterYear >= 1961 & waterYear <= 1990) %>% 
+  group_by(waterYear) %>% 
+  mutate(aver_ann_temp = mean(avg_T_c))
+
+#Average temperature by day for all water years:
+
+del_norte_daily_wy_aver_1961_1990_CN <- del_norte_yearly_wy_aver_1961_1990_CN %>% 
+  group_by(daymonth) %>% 
+  mutate(aver_day_temp = mean(aver_ann_temp))
+
+#average mean temperature by day for the period of record:
+
+del_norte_daily_wy_aver_1961_1990_CN <- del_norte_daily_wy_aver_1961_1990_CN %>% 
+  group_by(daymonth) %>% 
+  mutate(all_ave_temp = mean(del_norte_daily_wy_aver_1961_1990_CN$aver_day_temp)) %>% 
+  group_by(waterYear) %>% 
+  mutate(nmbr = n())
+
+
+```
+
+
+```{r CN 1961-1990 means figure}
+del_norte_daily_wy_aver_1961_1990_CN2 <- del_norte_daily_wy_aver_1961_1990_CN %>% 
+  #filter(waterYear == "1987" | waterYear == "2021") %>%
+  group_by(waterDay) %>%
+  mutate(date_temp = mean(avg_T_c))%>% 
+  select(waterDay, date_temp) %>% 
+  distinct(waterDay, .keep_all = TRUE)
+  
+del_norte_daily_wy_aver_1961_1990_CN2$date_temp <- signif(del_norte_daily_wy_aver_1961_1990_CN2$date_temp,3) #reduce the sig figs
+
+ggplot(del_norte_daily_wy_aver_1961_1990_CN2, aes(x = waterDay, y = date_temp))+#, color = waterYear)) +
+  geom_line(size= 0.7) +
+  theme_few()
+
+```
+
+## 1931-1960
+
+```{r 1931-1960 CN detrend}
+del_norte_yearly_wy_aver_1931_1960_CN <- del_norte_clean %>%
+  filter(waterYear >= 1931 & waterYear <= 1960) %>% 
+  group_by(waterYear) %>% 
+  mutate(aver_ann_temp = mean(avg_T_c))
+
+#Average temperature by day for all water years:
+
+del_norte_daily_wy_aver_1931_1960_CN <- del_norte_yearly_wy_aver_1931_1960_CN %>% 
+  group_by(daymonth) %>% 
+  mutate(aver_day_temp = mean(aver_ann_temp))
+
+#average mean temperature by day for the period of record:
+
+del_norte_daily_wy_aver_1931_1960_CN <- del_norte_daily_wy_aver_1931_1960_CN %>% 
+  group_by(daymonth) %>% 
+  mutate(all_ave_temp = mean(del_norte_daily_wy_aver_1931_1960_CN$aver_day_temp)) %>% 
+  group_by(waterYear) %>% 
+  mutate(nmbr = n())
+
+
+```
+
+
+```{r CN 1931-1960 means figure}
+del_norte_daily_wy_aver_1931_1960_CN2 <- del_norte_daily_wy_aver_1931_1960_CN %>% 
+  #filter(waterYear == "1987" | waterYear == "2021") %>%
+  group_by(waterDay) %>%
+  mutate(date_temp = mean(avg_T_c))%>% 
+  select(waterDay, date_temp)  %>% 
+  distinct(waterDay, .keep_all = TRUE)
+  
+del_norte_daily_wy_aver_1931_1960_CN2$date_temp <- signif(del_norte_daily_wy_aver_1931_1960_CN2$date_temp,3) #reduce the sig figs
+
+ggplot(del_norte_daily_wy_aver_1931_1960_CN2, aes(x = waterDay, y = date_temp))+#, color = waterYear)) +
+  geom_line(size= 0.7) +
+  theme_few()
+
+```
+
+## 1900-1930
+
+```{r 1901-1930 CN detrend}
+del_norte_yearly_wy_aver_1901_1930_CN <- del_norte_clean %>%
+  filter(waterYear >= 1901 & waterYear <= 1930) %>% 
+  group_by(waterYear) %>% 
+  mutate(aver_ann_temp = mean(avg_T_c))
+
+#Average temperature by day for all water years:
+
+del_norte_daily_wy_aver_1901_1930_CN <- del_norte_yearly_wy_aver_1901_1930_CN %>% 
+  group_by(daymonth) %>% 
+  mutate(aver_day_temp = mean(aver_ann_temp))
+
+#average mean temperature by day for the period of record:
+
+del_norte_daily_wy_aver_1901_1930_CN <- del_norte_daily_wy_aver_1901_1930_CN %>% 
+  group_by(daymonth) %>% 
+  mutate(all_ave_temp = mean(del_norte_daily_wy_aver_1901_1930_CN$aver_day_temp)) %>% 
+  group_by(waterYear) %>% 
+  mutate(nmbr = n())
+
+
+```
+
+
+```{r CN 1901-1930 means figure}
+del_norte_daily_wy_aver_1901_1930_CN2 <- del_norte_daily_wy_aver_1901_1930_CN %>% 
+  #filter(waterYear == "1987" | waterYear == "2021") %>%
+  group_by(waterDay) %>%
+  mutate(date_temp = mean(avg_T_c))%>% 
+  select(waterDay, date_temp) %>% 
+  distinct(waterDay, .keep_all = TRUE)
+
+
+del_norte_daily_wy_aver_1901_1930_CN2$date_temp <- signif(del_norte_daily_wy_aver_1901_1930_CN2$date_temp,3) #reduce the sig figs
+
+ggplot(del_norte_daily_wy_aver_1901_1930_CN2, aes(x = waterDay, y = date_temp))+#, color = waterYear)) +
+  geom_line(size= 0.7) +
+  theme_few()
+
+```
+
+```{r}
+
+climate_norm <- left_join(del_norte_daily_wy_aver_1991_2022_CN2, del_norte_daily_wy_aver_1961_1990_CN2, by= 'waterDay') 
+
+climate_norm <- left_join(climate_norm, del_norte_daily_wy_aver_1931_1960_CN2, by= 'waterDay')
+
+climate_norm <- left_join(climate_norm, del_norte_daily_wy_aver_1901_1930_CN2, by= 'waterDay')
+
+ggplot(climate_norm, aes(x=waterDay)) +  
+         #scale_size_manual(values=c("FALSE"=5,"TRUE"=8)) +
+  #scale_color_manual(values=c("FALSE"='#CC0000',"TRUE"='black')) +
+geom_line(aes(y = date_temp.x), size =1, color = "orange")+
+  geom_line(aes(y = date_temp.y), size =1, color = "darkgreen")+
+  geom_line(aes(y = date_temp.x.x), size =1, color = "purple")+
+  geom_line(aes(y = date_temp.y.y), size =1, color= "red")+
+  theme_few()+
+  scale_colour_manual("", breaks=c("date_temp.x","date_temp.y","date_temp.x.x", "date_temp.y.y"), values=c("date_temp.x" = "orange", "date_temp.y" = "darkgreen", "date_temp.x.x" = "purple", "date_temp.y.y" = "red"))+
+  xlab("Day of Year")+
+  ylab("Average temperature")
+
+
+
+    
+```
+
+
