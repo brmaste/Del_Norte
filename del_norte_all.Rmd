@@ -121,7 +121,7 @@ del_norte_yearly_wy_aver <- del_norte_clean %>%
 
 del_norte_daily_wy_aver <- del_norte_yearly_wy_aver %>% 
   group_by(daymonth) %>% 
-  mutate(aver_day_temp = mean(aver_ann_temp))
+  mutate(aver_day_temp = mean(avg_T_c))
 
 #average mean temperature by day for the period of record:
 
@@ -347,7 +347,7 @@ del_norte_yearly_wy_aver_87_21 <- del_norte_clean %>%
 
 del_norte_daily_wy_aver_87_21 <- del_norte_yearly_wy_aver_87_21 %>% 
   group_by(daymonth) %>% 
-  mutate(aver_day_temp = mean(aver_ann_temp))
+  mutate(aver_day_temp = mean(avg_T_c))
 
 #average mean temperature by day for the period of record:
 
@@ -555,7 +555,7 @@ del_norte_yearly_wy_aver_00_30 <- del_norte_clean %>%
 
 del_norte_daily_wy_aver_00_30 <- del_norte_yearly_wy_aver_00_30 %>% 
   group_by(daymonth) %>% 
-  mutate(aver_day_temp = mean(aver_ann_temp))
+  mutate(aver_day_temp = mean(avg_T_c))
 
 #average mean temperature by day for the period of record:
 
@@ -732,7 +732,7 @@ del_norte_yearly_wy_aver_31_60 <- del_norte_clean %>%
 
 del_norte_daily_wy_aver_31_60 <- del_norte_yearly_wy_aver_31_60 %>% 
   group_by(daymonth) %>% 
-  mutate(aver_day_temp = mean(aver_ann_temp))
+  mutate(aver_day_temp = mean(avg_T_c))
 
 #average mean temperature by day for the period of record:
 
@@ -910,7 +910,7 @@ del_norte_yearly_wy_aver_61_90 <- del_norte_clean %>%
 
 del_norte_daily_wy_aver_61_90 <- del_norte_yearly_wy_aver_61_90 %>% 
   group_by(daymonth) %>% 
-  mutate(aver_day_temp = mean(aver_ann_temp))
+  mutate(aver_day_temp = mean(avg_T_c))
 
 #average mean temperature by day for the period of record:
 
@@ -1086,7 +1086,7 @@ del_norte_yearly_wy_aver_91_20 <- del_norte_clean %>%
 
 del_norte_daily_wy_aver_91_20 <- del_norte_yearly_wy_aver_91_20 %>% 
   group_by(daymonth) %>% 
-  mutate(aver_day_temp = mean(aver_ann_temp))
+  mutate(aver_day_temp = mean(avg_T_c))
 
 #average mean temperature by day for the period of record:
 
@@ -1263,7 +1263,7 @@ del_norte_yearly_wy_aver_1991_2022_CN <- del_norte_clean %>%
 
 del_norte_daily_wy_aver_1991_2022_CN <- del_norte_yearly_wy_aver_1991_2022_CN %>% 
   group_by(daymonth) %>% 
-  mutate(aver_day_temp = mean(aver_ann_temp))
+  mutate(aver_day_temp = mean(avg_T_c))
 
 #average mean temperature by day for the period of record:
 
@@ -1305,7 +1305,7 @@ del_norte_yearly_wy_aver_1961_1990_CN <- del_norte_clean %>%
 
 del_norte_daily_wy_aver_1961_1990_CN <- del_norte_yearly_wy_aver_1961_1990_CN %>% 
   group_by(daymonth) %>% 
-  mutate(aver_day_temp = mean(aver_ann_temp))
+  mutate(aver_day_temp = mean(avg_T_c))
 
 #average mean temperature by day for the period of record:
 
@@ -1347,7 +1347,7 @@ del_norte_yearly_wy_aver_1931_1960_CN <- del_norte_clean %>%
 
 del_norte_daily_wy_aver_1931_1960_CN <- del_norte_yearly_wy_aver_1931_1960_CN %>% 
   group_by(daymonth) %>% 
-  mutate(aver_day_temp = mean(aver_ann_temp))
+  mutate(aver_day_temp = mean(avg_T_c))
 
 #average mean temperature by day for the period of record:
 
@@ -1389,7 +1389,7 @@ del_norte_yearly_wy_aver_1901_1930_CN <- del_norte_clean %>%
 
 del_norte_daily_wy_aver_1901_1930_CN <- del_norte_yearly_wy_aver_1901_1930_CN %>% 
   group_by(daymonth) %>% 
-  mutate(aver_day_temp = mean(aver_ann_temp))
+  mutate(aver_day_temp = mean(avg_T_c))
 
 #average mean temperature by day for the period of record:
 
